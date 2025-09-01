@@ -1,0 +1,394 @@
+/* --- Termux Web Backup Suite - Custom Stylesheet --- */
+
+:root {
+    --bg-dark: #1e2124;
+    --bg-panel: #282b30;
+    --bg-input: #36393f;
+    --border-color: #40444b;
+    --text-light: #e9ecef;
+    --text-muted: #adb5bd;
+    --accent-green: #43b581;
+    --accent-green-hover: #3aa172;
+    --accent-blue: #5865f2;
+    --accent-blue-hover: #4e5ae3;
+    --accent-cyan: #17a2b8;
+    --accent-red: #ed4245;
+    --accent-yellow: #faa61a;
+    --font-family-sans-serif: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --border-radius: 6px;
+}
+
+/* --- Global & Typography --- */
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-family-sans-serif);
+    background-color: var(--bg-dark);
+    color: var(--text-light);
+    margin: 0;
+    padding: 20px;
+    font-size: 16px;
+    line-height: 1.5;
+}
+
+h1, h2, h3 {
+    color: var(--text-light);
+    margin-top: 0;
+    font-weight: 600;
+}
+h1 { font-size: 1.75rem; }
+h2 { font-size: 1.5rem; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color); }
+h3 { font-size: 1.2rem; margin-top: 25px; margin-bottom: 15px; }
+
+h2 i, h3 i {
+    color: var(--accent-cyan);
+    margin-right: 12px;
+}
+
+p {
+    color: var(--text-muted);
+    margin: 0 0 15px 0;
+}
+
+small {
+    font-weight: normal;
+    color: var(--text-muted);
+}
+
+/* --- Layout & Container --- */
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 25px;
+}
+
+main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 25px;
+}
+
+.control-panel, .monitor-panel {
+    background-color: var(--bg-panel);
+    border-radius: var(--border-radius);
+    padding: 25px;
+    border: 1px solid var(--border-color);
+}
+
+.form-section {
+    margin-bottom: 20px;
+}
+
+hr.section-divider {
+    border: none;
+    border-top: 1px solid var(--border-color);
+    margin: 30px 0;
+}
+
+/* --- Header & Status Indicator --- */
+#status-indicator {
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: background-color 0.3s ease;
+}
+/* Add these rules to your style.css file */
+
+
+.accent-cyan-btn {
+    background-color: var(--accent-cyan);
+    color: white;
+}
+.accent-cyan-btn:hover:not(:disabled) {
+    background-color: #138496;
+}
+
+.small-note {
+    font-size: 0.85em;
+    text-align: center;
+    margin-top: 15px;
+    color: var(--text-muted);
+}
+#status-indicator i { font-size: 0.7em; }
+
+.status-idle { background-color: #4f545c; color: #dcddde; }
+.status-idle i { color: #b9bbbe; }
+.status-running { background-color: var(--accent-blue); color: white; }
+.status-running i { color: white; animation: pulse 1.5s infinite; }
+.status-success { background-color: var(--accent-green); color: white; }
+.status-success i { color: white; }
+.status-error { background-color: var(--accent-red); color: white; }
+.status-error i { color: white; }
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.5; }
+    100% { opacity: 1; }
+}
+
+/* --- Add this to the end of style.css --- */
+#file-log-output {
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 15px;
+    height: 350px;
+    overflow-y: auto;
+    white-space: pre; /* Use pre to respect indentation */
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    line-height: 1.3;
+}
+
+/* --- Form Elements --- */
+.form-group {
+    margin-bottom: 18px;
+}
+
+label {
+    display: block;
+    font-weight: 500;
+    margin-bottom: 8px;
+    color: var(--text-muted);
+}
+
+input[type="text"], input[type="password"], select, input[type="file"] {
+    width: 100%;
+    padding: 10px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    color: var(--text-light);
+    font-size: 1rem;
+    transition: border-color 0.2s ease;
+}
+
+input[type="text"]:focus, input[type="password"]:focus, select:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+}
+
+/* --- Action Buttons --- */
+.action-buttons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-top: 25px;
+}
+
+.action-buttons button, .action-btn {
+    padding: 12px 15px;
+    border: none;
+    border-radius: var(--border-radius);
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.2s ease, opacity 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+}
+
+button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+#start-local-btn {
+    background-color: var(--accent-green);
+    color: white;
+}
+#start-local-btn:hover:not(:disabled) { background-color: var(--accent-green-hover); }
+
+#start-download-btn, #start-upload-btn, #start-extraction-btn {
+    background-color: var(--accent-blue);
+    color: white;
+}
+#start-download-btn:hover:not(:disabled),
+#start-upload-btn:hover:not(:disabled),
+#start-extraction-btn:hover:not(:disabled) {
+    background-color: var(--accent-blue-hover);
+}
+
+/* --- File Tree (jstree) --- */
+#file-tree {
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 10px;
+    min-height: 200px;
+}
+.jstree-default-dark .jstree-anchor { color: var(--text-light); }
+.jstree-default-dark .jstree-hovered { background-color: var(--bg-input); }
+.jstree-default-dark .jstree-clicked { background-color: #474b52; }
+
+/* --- Restore Panel --- */
+.restore-nav {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+.restore-nav-btn {
+    flex-grow: 1;
+    padding: 10px;
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-color);
+    color: var(--text-muted);
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.restore-nav-btn.active {
+    background-color: var(--accent-blue);
+    color: white;
+    border-color: var(--accent-blue);
+}
+.hidden { display: none; }
+
+/* --- Backup List Table --- */
+.table-header { display: flex; justify-content: space-between; align-items: center; }
+#refresh-backups-btn { background: none; border: none; color: var(--text-muted); font-size: 1.1rem; cursor: pointer; padding: 5px; }
+#refresh-backups-btn:hover { color: var(--text-light); }
+
+.table-container {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    background-color: var(--bg-input);
+}
+.backup-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.backup-table th, .backup-table td {
+    padding: 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+}
+.backup-table th { font-weight: 600; color: var(--text-muted); }
+.backup-table tbody tr:last-child td { border-bottom: none; }
+.backup-table tbody tr:hover { background-color: #40444b; }
+.delete-btn { background: none; border: none; color: var(--accent-red); cursor: pointer; }
+
+/* --- Monitor Panel --- */
+.progress-section { margin-bottom: 20px; }
+.progress-bar-container {
+    width: 100%;
+    background-color: var(--bg-input);
+    border-radius: 20px;
+    overflow: hidden;
+    height: 18px;
+    border: 1px solid var(--border-color);
+}
+.progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background-color: var(--accent-green);
+    border-radius: 20px;
+    transition: width 0.3s ease-out;
+}
+.progress-details {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 8px;
+    color: var(--text-muted);
+    font-size: 0.9em;
+}
+.progress-text {
+    text-align: center;
+    font-weight: bold;
+    color: white;
+    margin-top: -19px;
+    position: relative;
+    font-size: 0.8rem;
+    text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+}
+
+.log-panel pre {
+    background-color: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius);
+    padding: 15px;
+    height: 350px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.9rem;
+}
+
+.log-line.info { color: var(--text-light); }
+.log-line.warn { color: var(--accent-yellow); }
+.log-line.error { color: var(--accent-red); }
+.log-line.success { color: var(--accent-green); }
+.log-line.stderr { color: #a0a0a0; font-style: italic; }
+
+/* --- Responsive Design --- */
+@media (max-width: 992px) {
+    main {
+        grid-template-columns: 1fr;
+    }
+}
+@media (max-width: 768px) {
+    body { padding: 10px; }
+    .action-buttons { grid-template-columns: 1fr; }
+}
+
+
+/* --- NEW: Modal Styles --- */
+#calculating-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: none; /* Hidden by default */
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.modal-content {
+    background-color: var(--bg-panel);
+    padding: 40px;
+    border-radius: var(--border-radius);
+    text-align: center;
+    color: var(--text-light);
+    border: 1px solid var(--border-color);
+}
+
+.loader {
+    border: 5px solid var(--bg-input);
+    border-top: 5px solid var(--accent-blue);
+    border-radius: 50%;
+    width: 50px;
+    height: 50px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto 20px auto;
+}
+
+.modal-content h3 {
+    margin: 0;
+    font-size: 1.2rem;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
