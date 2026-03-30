@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Termux Web Backup Suite</title>
+    <title>Web Backup Suite</title>
     <!-- Font Awesome for icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
     <!-- jsTree theme -->
@@ -14,7 +14,7 @@
 <body>
     <div class="container">
         <header>
-            <h1><i class="fas fa-server"></i> Termux Web Backup Suite</h1>
+            <h1><i class="fas fa-server"></i> Web Backup Suite</h1>
             <div id="status-indicator" class="status-idle">
                 <i class="fas fa-circle"></i> Idle
             </div>
@@ -80,7 +80,7 @@
                     </div>
                 
                     <div class="action-buttons">
-                        <button id="start-local-btn"><i class="fas fa-save"></i> Save to Termux</button>
+                        <button id="start-local-btn"><i class="fas fa-save"></i> Save to Local Server</button>
                         <button id="start-download-btn"><i class="fas fa-download"></i> Download to Browser</button>
                     </div>
                 </div>
@@ -92,12 +92,12 @@
                     <h2><i class="fas fa-upload"></i> Restore from Backup</h2>
                     
                     <div class="restore-nav">
-                        <button id="nav-restore-local" class="restore-nav-btn active">From Termux</button>
+                        <button id="nav-restore-local" class="restore-nav-btn active">From Server (~/backups)</button>
                         <button id="nav-restore-upload" class="restore-nav-btn">From Upload</button>
                     </div>
 
                     <div id="restore-local-panel" class="restore-content">
-                        <p>Select a backup stored in `~/backups/`.</p>
+                        <p>Select a backup stored on the host system.</p>
                         <div class="form-group">
                             <div class="table-header">
                                 <label>Available Backups</label>
@@ -126,10 +126,10 @@
                     </div>
                     
                     <div id="restore-upload-panel" class="restore-content hidden">
-                        <p>Choose a backup file from your device to upload and extract.</p>
+                        <p>Choose a backup file from your local device to upload and extract.</p>
                         <div class="form-group">
                             <label for="upload-file-input">Select Backup File</label>
-                            <input type="file" id="upload-file-input" accept=".tar.zst,.gpg,.age">
+                            <input type="file" id="upload-file-input" accept=".tar.zst,.tar.gz,.gpg,.age">
                         </div>
                         <div class="action-buttons">
                             <button id="start-upload-btn"><i class="fas fa-cloud-upload-alt"></i> Upload & Extract</button>
@@ -139,10 +139,10 @@
                     <div class="restore-options-common">
                         <!-- Password fields for decryption appear here, controlled by JS -->
                         <div id="age-restore-options" class="encryption-options-wrapper hidden">
-                             <p><i class="fas fa-info-circle"></i> A passphrase prompt will appear in your Termux terminal.</p>
+                             <p><i class="fas fa-info-circle"></i> A passphrase prompt will appear in the server terminal.</p>
                         </div>
                         <div id="gpg-restore-options" class="encryption-options-wrapper hidden">
-                             <p><i class="fas fa-info-circle"></i> GPG decryption uses your local keyring. A prompt will appear in your Termux terminal.</p>
+                             <p><i class="fas fa-info-circle"></i> GPG decryption uses the host keyring. A prompt will appear in the server terminal.</p>
                         </div>
                     </div>
                 </div>
