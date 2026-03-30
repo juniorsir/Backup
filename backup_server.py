@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 #
-# Termux Web Backup Suite v16.0 (Final, Stable)
-# This version integrates the "Save Subdirs" feature as a checkbox, modifying
-# the behavior of the main backup actions for both local save and browser download
-# (as a zip file). It includes all prior bug fixes and enhancements.
+# Web Backup Suite - Cross-Platform Edition
+# Supports: Termux (Android), WSL (Windows), Ubuntu, Generic Linux, and macOS.
 
 import os
 import sys
 import shutil
 import subprocess
-import json
 import threading
 import socket
 import re
 import atexit
 import logging
 import time
+import platform
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
-from flask_socketio import SocketIO
 from urllib.parse import quote
-from werkzeug.utils import secure_filename
 import io
 import zipfile
+
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask_socketio import SocketIO
+from werkzeug.utils import secure_filename
 
 try:
     import qrcode
@@ -30,33 +29,59 @@ try:
 except ImportError:
     QRCODE_PY_AVAILABLE = False
 
-# --- Debug Configuration ---
+# --- Configuration & OS Detection ---
 DEBUG_MODE = True
+HOST = '0.0.0.0'
+PORT = 8000
+
+# Platform Identifiers
+IS_TERMUX = 'com.termux' in os.environ.get('PREFIX', '')
+IS_MACOS = sys.platform == 'darwin'
+IS_WSL = 'microsoft' in platform.uname().release.lower()
+IS_LINUX = sys.platform.startswith('linux') and not IS_TERMUX
+
+# Dynamic Path Resolution
+HOME_DIR = os.path.expanduser("~")
+BACKUPS_PATH = os.path.join(HOME_DIR, "backups")
+TEMP_UPLOAD_PATH = os.path.join(BACKUPS_PATH, "temp_uploads")
+PREFIX_DIR = os.environ.get("PREFIX", "/usr") if IS_TERMUX else "/usr"
+SHARED_STORAGE_PATH = os.path.join(HOME_DIR, "storage", "shared") if IS_TERMUX else None
 
 class TermColors:
     HEADER = '\033[95m'; OKBLUE = '\033[94m'; OKCYAN = '\033[96m'; OKGREEN = '\033[92m'
     WARNING = '\033[93m'; FAIL = '\033[91m'; ENDC = '\033[0m'; BOLD = '\033[1m'
+
+# --- Dependency Locator ---
+def find_binary(name, fallbacks=None):
+    path = shutil.which(name)
+    if path: return path
+    if fallbacks:
+        for fb in fallbacks:
+            path = shutil.which(fb)
+            if path: return path
+    return None
+
+BINS = {
+    'tar': find_binary('tar'),
+    'zstd': find_binary('zstd'),
+    'gzip': find_binary('gzip'),
+    'pv': find_binary('pv'),
+    'gpg': find_binary('gpg', ['gpg2']),
+    'age': find_binary('age'),
+    'du': find_binary('du'),
+    'cat': find_binary('cat'),
+    'stdbuf': find_binary('stdbuf'),
+    'wakelock': find_binary('termux-wake-lock'),
+    'wakeunlock': find_binary('termux-wake-unlock')
+}
 
 # --- Globals ---
 ROOT_NODE_CACHE = None
 ROOT_NODE_CACHE_TIME = 0
 print_lock = threading.Lock()
 
-# --- Configuration ---
-HOST = '0.0.0.0'; PORT = 8000
-HOME_DIR = os.getenv("HOME")
-PREFIX_DIR = "/data/data/com.termux/files/usr"
-BACKUPS_PATH = os.path.join(HOME_DIR, "backups")
-TEMP_UPLOAD_PATH = os.path.join(BACKUPS_PATH, "temp_uploads")
-SHARED_STORAGE_PATH = os.path.join(HOME_DIR, "storage", "shared")
-STDBUF_BIN = "/data/data/com.termux/files/usr/bin/stdbuf"; CAT_BIN = "/data/data/com.termux/files/usr/bin/cat"
-TAR_BIN = "/data/data/com.termux/files/usr/bin/tar"; ZSTD_BIN = "/data/data/com.termux/files/usr/bin/zstd"
-GPG_BIN = "/data/data/com.termux/files/usr/bin/gpg"; AGE_BIN = "/data/data/com.termux/files/usr/bin/age"
-PV_BIN = "/data/data/com.termux/files/usr/bin/pv"; DU_BIN = "/data/data/com.termux/files/usr/bin/du"
-WAKELOCK_BIN = "/data/data/com.termux/files/usr/bin/termux-wake-lock"
-WAKEUNLOCK_BIN = "/data/data/com.termux/files/usr/bin/termux-wake-unlock"
-
-app = Flask(__name__); app.config['SECRET_KEY'] = 'a_very_secret_key'
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'a_very_secret_key'
 socketio = SocketIO(app, async_mode='threading')
 
 # --- Helper & Logging Functions ---
@@ -72,7 +97,8 @@ def log_event(message, level='info'):
 
 def monitor_process_stderr(process, stream_name, error_event=None, policy='ignore', failed_files_list=None, base_path=None):
     is_verbose_tar = (stream_name == 'tar' and any('v' in arg for arg in process.args))
-    critical_errors = ["permission denied", "cannot open"]; ignorable_errors = ["broken pipe", "write error"]
+    critical_errors = ["permission denied", "cannot open"]
+    ignorable_errors = ["broken pipe", "write error", "file changed as we read it"]
     tar_error_re = re.compile(r"tar: (.*?): Cannot (?:open|read|stat)")
 
     with process.stderr as pipe:
@@ -84,7 +110,7 @@ def monitor_process_stderr(process, stream_name, error_event=None, policy='ignor
                 filename = line_str
                 socketio.emit('file_processed', {'filename': filename})
                 depth = filename.count(os.sep)
-                indent = '  ' * depth
+                indent = '  ' * min(depth, 5)
                 basename = os.path.basename(filename) or filename
                 with print_lock:
                     sys.stdout.write(f"{indent}✅ {basename}\n"); sys.stdout.flush()
@@ -102,12 +128,21 @@ def monitor_process_stderr(process, stream_name, error_event=None, policy='ignor
                 error_event.set(); break
 
 def monitor_pv_progress(pv_process):
-    percent_re, speed_re, eta_re = re.compile(r"(\d+\.?\d*)[%]"), re.compile(r"\[\s*(\d+\.?\d*\w+i?B/s)\s*\]"), re.compile(r"ETA\s+([\d:]+)")
+    percent_re = re.compile(r"(\d+\.?\d*)[%]")
+    speed_re = re.compile(r"\[\s*(\d+\.?\d*\w+i?B/s)\s*\]")
+    eta_re = re.compile(r"ETA\s+([\d:]+)")
+    
     with pv_process.stderr as pipe:
         for line in iter(pipe.readline, b''):
             line_str = line.decode('utf-8', errors='ignore')
-            percent, speed, eta = percent_re.search(line_str), speed_re.search(line_str), eta_re.search(line_str)
-            progress_data = {'percent': f"{float(percent.group(1)):.1f}" if percent else "0.0", 'speed': speed.group(1) if speed else "--", 'eta': eta.group(1) if eta else "--:--"}
+            percent = percent_re.search(line_str)
+            speed = speed_re.search(line_str)
+            eta = eta_re.search(line_str)
+            progress_data = {
+                'percent': f"{float(percent.group(1)):.1f}" if percent else "0.0",
+                'speed': speed.group(1) if speed else "--",
+                'eta': eta.group(1) if eta else "--:--"
+            }
             if speed: socketio.emit('progress_update', progress_data)
 
 def prune_redundant_paths(paths):
@@ -117,69 +152,92 @@ def prune_redundant_paths(paths):
 
 # --- Core Logic ---
 def build_backup_pipeline(config):
-    sources = config.get('sources', []);
+    if not BINS['tar']: raise FileNotFoundError("System 'tar' binary is missing!")
+    
+    sources = config.get('sources', [])
     if not sources: raise ValueError("No source directories selected.")
     pruned_sources = prune_redundant_paths(sources)
-    if not pruned_sources: raise ValueError("Source list is empty after pruning.")
     log_event(f"Pruned source list to: {pruned_sources}", "info")
     for path in pruned_sources:
         if not os.access(path, os.R_OK): raise PermissionError(f"Permission Denied for '{path}'.")
     
-    total_size = 0; cache_map = {node['id']: node['data'].get('size_bytes', 0) for node in (ROOT_NODE_CACHE or [])}
+    # Calculate Total Size
+    total_size = 0
+    cache_map = {node['id']: node['data'].get('size_bytes', 0) for node in (ROOT_NODE_CACHE or [])}
     if all(p in cache_map for p in pruned_sources):
         total_size = sum(cache_map.get(p, 0) for p in pruned_sources)
-        log_debug(f"Calculated total size from cache: {total_size} bytes")
     else:
-        base = os.path.commonpath(pruned_sources) if len(pruned_sources)>1 else os.path.dirname(pruned_sources[0])
-        rel_sources = [os.path.relpath(p, base) for p in pruned_sources]
-        try:
-            cmd = f"cd {quote(base)} && '{DU_BIN}' -sb {' '.join(map(quote, rel_sources))}"
-            output = subprocess.check_output(cmd, shell=True, timeout=30).decode('utf-8')
-            if output: total_size = sum(int(line.split()[0]) for line in output.strip().split('\n'))
-        except Exception as e: log_event(f"Could not calculate total size (often OK): {e}", "warn")
+        total_size = sum(get_size_bytes(p) for p in pruned_sources)
 
-    common_base = os.path.commonpath(pruned_sources) if len(pruned_sources)>1 else os.path.dirname(pruned_sources[0])
+    common_base = os.path.commonpath(pruned_sources) if len(pruned_sources) > 1 else os.path.dirname(pruned_sources[0])
     relative_sources = [os.path.relpath(p, common_base) for p in pruned_sources]
     processes = []; error_policy = config.get('errorHandling', 'ignore')
     show_progress = str(config.get('showFileProgress')).lower() == 'true'
 
+    # 1. Tar Command Construction
     tar_verb = "v" if show_progress else ""
-    tar_cmd = [STDBUF_BIN, '-oL', TAR_BIN, f"-ch{tar_verb}f", "-"]
-    if error_policy == 'ignore': tar_cmd.append("--ignore-failed-read")
+    tar_cmd = []
+    if BINS['stdbuf'] and not IS_MACOS: # macOS stdbuf behavior is strict/different
+        tar_cmd.extend([BINS['stdbuf'], '-oL'])
+    tar_cmd.extend([BINS['tar'], f"-ch{tar_verb}f", "-"])
+    if error_policy == 'ignore' and not IS_MACOS: # --ignore-failed-read is GNU tar specific
+        tar_cmd.append("--ignore-failed-read")
     tar_cmd.extend(["-C", common_base, *relative_sources])
     
-    pv_cmd = [PV_BIN, '-f', '-p', '-t', '-e', '-r', '-b', '-B', '256k']
-    if total_size > 0: pv_cmd.extend(['-s', str(total_size)])
-
-    tar_proc = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE); processes.append(("tar", tar_proc))
-    pv_proc = subprocess.Popen(pv_cmd, stdin=tar_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE); processes.append(("pv", pv_proc))
-    zstd_proc = subprocess.Popen([ZSTD_BIN, "-T0"], stdin=pv_proc.stdout, stdout=subprocess.PIPE, stderr=subprocess.PIPE); processes.append(("zstd", zstd_proc))
-    tar_proc.stdout.close(); pv_proc.stdout.close()
+    tar_proc = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    processes.append(("tar", tar_proc))
+    next_in = tar_proc.stdout
     
-    final_proc = zstd_proc
+    # 2. PV (Progress Monitoring) Injection
+    if BINS['pv']:
+        pv_cmd = [BINS['pv'], '-f', '-p', '-t', '-e', '-r', '-b', '-B', '256k']
+        if total_size > 0: pv_cmd.extend(['-s', str(total_size)])
+        pv_proc = subprocess.Popen(pv_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(("pv", pv_proc))
+        threading.Thread(target=monitor_pv_progress, args=(pv_proc,), daemon=True).start()
+        next_in.close() # Tar receives SIGPIPE if pv dies
+        next_in = pv_proc.stdout
+
+    # 3. Compression Injection (Adaptive)
+    if BINS['zstd']:
+        comp_cmd = [BINS['zstd'], "-T0"]
+        comp_name = "zstd"
+    else:
+        comp_cmd = [BINS['gzip'], "-c"] # Fallback if zstd missing
+        comp_name = "gzip"
+        
+    comp_proc = subprocess.Popen(comp_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    processes.append((comp_name, comp_proc))
+    next_in.close()
+    next_in = comp_proc.stdout
+    
+    # 4. Encryption Injection
+    final_proc = comp_proc
     if str(config.get('encrypt')).lower() == 'true':
-        method = config.get('encryptionMethod'); last_out = zstd_proc.stdout
-        if method == 'age':
-            password = config.get('encryptionPassword');
+        method = config.get('encryptionMethod')
+        if method == 'age' and BINS['age']:
+            password = config.get('encryptionPassword')
             if not password: raise ValueError("Age encryption requires a passphrase.")
             env = os.environ.copy(); env['AGE_PASSPHRASE'] = password
-            age_cmd = [AGE_BIN, "-p", "-o", "-"]
-            final_proc = subprocess.Popen(age_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
-            threading.Thread(target=lambda s, d: (shutil.copyfileobj(s, d), s.close(), d.close()), args=(last_out, final_proc.stdin), daemon=True).start()
-        elif method == 'gpg':
-            recipient = config.get('gpgRecipient');
+            age_cmd = [BINS['age'], "-p", "-o", "-"]
+            final_proc = subprocess.Popen(age_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        elif method == 'gpg' and BINS['gpg']:
+            recipient = config.get('gpgRecipient')
             if not recipient: raise ValueError("GPG encryption requires a recipient.")
-            gpg_cmd = [GPG_BIN, "--encrypt", "--recipient", recipient, "--output", "-"]
-            final_proc = subprocess.Popen(gpg_cmd, stdin=last_out, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            last_out.close()
+            gpg_cmd = [BINS['gpg'], "--batch", "--yes", "--encrypt", "--recipient", recipient, "--output", "-"]
+            final_proc = subprocess.Popen(gpg_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        else:
+            raise RuntimeError(f"Requested encryption method '{method}' binary not found on system.")
+        
         processes.append((method, final_proc))
+        next_in.close()
         
     error_event = threading.Event(); failed_files = []
     
+    # Start thread monitors
     threading.Thread(target=monitor_process_stderr, args=(tar_proc, 'tar', error_event, error_policy, failed_files, common_base), daemon=True).start()
-    threading.Thread(target=monitor_pv_progress, args=(pv_proc,), daemon=True).start()
-    threading.Thread(target=monitor_process_stderr, args=(zstd_proc, 'zstd'), daemon=True).start()
-    if final_proc is not zstd_proc:
+    threading.Thread(target=monitor_process_stderr, args=(comp_proc, comp_name), daemon=True).start()
+    if final_proc is not comp_proc:
         threading.Thread(target=monitor_process_stderr, args=(final_proc, final_proc.args[0]), daemon=True).start()
 
     return final_proc.stdout, processes, error_event, failed_files
@@ -193,26 +251,41 @@ def build_extraction_pipeline(config, is_uploaded_file=False):
     try: env['GPG_TTY'] = os.ttyname(sys.stdout.fileno())
     except Exception: log_event("Could not determine TTY for prompts.", "warn")
 
-    cat_proc = subprocess.Popen([CAT_BIN, source_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE); processes.append(("cat", cat_proc))
+    cat_proc = subprocess.Popen([BINS['cat'], source_path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    processes.append(("cat", cat_proc))
     next_input = cat_proc.stdout
     
-    if filename.endswith(".age"):
-        age_cmd = [AGE_BIN, "--decrypt"]
+    # Decryption Phase
+    if filename.endswith(".age") and BINS['age']:
+        age_cmd = [BINS['age'], "--decrypt"]
         age_proc = subprocess.Popen(age_cmd, stdin=next_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         next_input.close(); processes.append(("age", age_proc)); next_input = age_proc.stdout
-    elif filename.endswith(".gpg"):
-        gpg_cmd = [GPG_BIN, "--decrypt"]
+    elif filename.endswith(".gpg") and BINS['gpg']:
+        gpg_cmd = [BINS['gpg'], "--decrypt"]
         gpg_proc = subprocess.Popen(gpg_cmd, stdin=next_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         next_input.close(); processes.append(("gpg", gpg_proc)); next_input = gpg_proc.stdout
         
-    zstd_proc = subprocess.Popen([f"{ZSTD_BIN}cat"], stdin=next_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    processes.append(("zstd", zstd_proc)); next_input.close()
+    # Decompression Phase (Adaptive)
+    if ".zst" in filename and BINS['zstd']:
+        decomp_proc = subprocess.Popen([BINS['zstd'], "-dc"], stdin=next_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(("zstd", decomp_proc))
+    elif (".gz" in filename or ".tgz" in filename) and BINS['gzip']:
+        decomp_proc = subprocess.Popen([BINS['gzip'], "-dc"], stdin=next_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        processes.append(("gzip", decomp_proc))
+    else:
+        # Fallback raw passthrough or unsupported format error
+        raise ValueError("Unsupported compression format or missing decompressor.")
+    
+    next_input.close()
+    next_input = decomp_proc.stdout
 
+    # Extraction Phase
     show_progress = str(config.get('showFileProgress')).lower() == 'true'
     tar_verb = "v" if show_progress else ""
-    tar_cmd = [TAR_BIN, f"-x{tar_verb}f", "-"]
-    tar_proc = subprocess.Popen(tar_cmd, stdin=zstd_proc.stdout, stderr=subprocess.PIPE)
-    processes.append(("tar", tar_proc)); zstd_proc.stdout.close()
+    tar_cmd = [BINS['tar'], f"-x{tar_verb}f", "-"]
+    tar_proc = subprocess.Popen(tar_cmd, stdin=next_input, stderr=subprocess.PIPE)
+    processes.append(("tar", tar_proc))
+    next_input.close()
     
     for name, proc in processes:
         threading.Thread(target=monitor_process_stderr, args=(proc, name), daemon=True).start()
@@ -222,14 +295,19 @@ def build_extraction_pipeline(config, is_uploaded_file=False):
 def generate_backup_filename(config):
     date_str = datetime.now().strftime('%d_%b').upper()
     sources = set(config.get('sources', []))
+    
     termux_map = {HOME_DIR: "HOME", PREFIX_DIR: "USR"}
     termux_descriptors = sorted([name for path, name in termux_map.items() if path in sources])
     has_custom_paths = any(s not in termux_map for s in sources)
+    
     storage_parts = []
-    if termux_descriptors: storage_parts.append(f"TERMUX({'/'.join(termux_descriptors)})")
+    if termux_descriptors: storage_parts.append(f"SYS({'/'.join(termux_descriptors)})")
     if has_custom_paths: storage_parts.append("CUSTOM")
     storage_type_str = "+".join(storage_parts) or "EMPTY"
-    base_filename = f"{date_str}_{storage_type_str}.tar.zst"
+    
+    ext = ".tar.zst" if BINS['zstd'] else ".tar.gz"
+    base_filename = f"{date_str}_{storage_type_str}{ext}"
+    
     if str(config.get('encrypt')).lower() == 'true':
         if config.get('encryptionMethod') == 'age': base_filename += ".age"
         elif config.get('encryptionMethod') == 'gpg': base_filename += ".gpg"
@@ -245,16 +323,21 @@ def run_backup_task(config, destination_stream):
                 chunk = pipe.read(8192)
                 if not chunk: break
                 destination_stream.write(chunk)
+                
         if error_event.is_set(): raise RuntimeError("Backup aborted due to critical error.")
+        
         exit_codes = {name: proc.wait() for name, proc in processes}
         tar_code = exit_codes.get('tar', 0)
         other_codes_ok = all(code == 0 for name, code in exit_codes.items() if name != 'tar')
-        if (tar_code in [0, 1]) and other_codes_ok:
+        
+        if (tar_code in [0, 1]) and other_codes_ok: # tar exits 1 on some warnings (e.g., file changed)
             pipeline_success = True
-            if tar_code == 1: log_event("tar finished with warnings.", "warn")
+            if tar_code == 1: log_event("tar finished with warnings (usually non-critical).", "warn")
             log_event("Backup task completed successfully!", 'success')
             socketio.emit('backup_complete', {'status': 'success', 'failed_files': failed_files})
-        else: raise RuntimeError(f"Backup failed. Exit codes: {exit_codes}")
+        else: 
+            raise RuntimeError(f"Backup failed. Exit codes: {exit_codes}")
+            
     except Exception as e:
         log_event(f"A critical error occurred: {e}", 'error')
         socketio.emit('backup_complete', {'status': 'error', 'failed_files': failed_files})
@@ -284,38 +367,54 @@ def run_extraction_task(config, is_uploaded_file=False):
         if temp_file and os.path.exists(temp_file):
             os.remove(temp_file); log_event("Cleaned up temporary file.", "info")
 
-# --- Flask Routes & Startup ---
-@app.route('/')
-def index(): return render_template('index.html')
-
+# --- OS-Agnostic Utilities ---
 def get_human_readable_size(path):
-    if not os.path.isdir(path): return ""
-    try:
-        cmd = [DU_BIN, "-sh", path]; result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
-        output = result.stdout.strip()
-        if output:
-            size = output.split()[0]
-            if path == SHARED_STORAGE_PATH and (size == "0" or size == "0B"): return "(?)"
-            return f"({size})"
-        return "(?)"
-    except Exception: return "(Error)"
+    size_bytes = get_size_bytes(path)
+    if size_bytes == 0: return "(?)"
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_bytes < 1024.0: return f"({size_bytes:.1f} {unit})"
+        size_bytes /= 1024.0
+    return "(?)"
 
 def get_size_bytes(path):
     if not os.path.isdir(path): return 0
+    # Try fast GNU du
+    if BINS['du']:
+        try:
+            flag = '-sb' if not IS_MACOS else '-sk' # macOS du uses 1k blocks
+            out = subprocess.check_output([BINS['du'], flag, path], stderr=subprocess.DEVNULL, text=True, timeout=15)
+            size = int(out.split()[0])
+            return size * 1024 if IS_MACOS else size
+        except Exception: pass
+    
+    # Fallback to Python standard library
+    total = 0
     try:
-        cmd = [DU_BIN, "-sb", path]; result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=60)
-        output = result.stdout.strip()
-        if output: return int(output.split()[0])
-        return 0
-    except Exception: return 0
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if not os.path.islink(fp): total += os.path.getsize(fp)
+    except Exception: pass
+    return total
 
 def task_pre_cache_root_nodes():
     global ROOT_NODE_CACHE, ROOT_NODE_CACHE_TIME
-    print(f"{TermColors.BOLD}Pre-caching root directory sizes...{TermColors.ENDC}"); nodes = []
-    root_paths = [
-        {"text": "Shared Storage", "id": SHARED_STORAGE_PATH, "icon": "fa fa-mobile-alt"},
-        {"text": "Termux Home", "id": HOME_DIR, "icon": "fa fa-terminal"},
-        {"text": "Termux Prefix (usr)", "id": PREFIX_DIR, "icon": "fa fa-cogs"}]
+    print(f"{TermColors.BOLD}Pre-caching root directory sizes...{TermColors.ENDC}")
+    
+    root_paths = []
+    if IS_TERMUX:
+        if SHARED_STORAGE_PATH and os.path.exists(SHARED_STORAGE_PATH):
+            root_paths.append({"text": "Shared Storage", "id": SHARED_STORAGE_PATH, "icon": "fa fa-mobile-alt"})
+        root_paths.append({"text": "Termux Home", "id": HOME_DIR, "icon": "fa fa-terminal"})
+        root_paths.append({"text": "Termux Prefix (usr)", "id": PREFIX_DIR, "icon": "fa fa-cogs"})
+    elif IS_MACOS:
+        root_paths.append({"text": "Home Directory", "id": HOME_DIR, "icon": "fa fa-home"})
+        root_paths.append({"text": "Root System (/)", "id": "/", "icon": "fa fa-hdd"})
+    else: # Linux / WSL
+        root_paths.append({"text": "Home Directory", "id": HOME_DIR, "icon": "fa fa-home"})
+        root_paths.append({"text": "Root File System (/)", "id": "/", "icon": "fa fa-hdd"})
+
+    nodes = []
     for root in root_paths:
         if root["id"] and os.path.exists(root["id"]):
             sys.stdout.write(f"  -> Calculating size for {root['text']}..."); sys.stdout.flush()
@@ -325,7 +424,13 @@ def task_pre_cache_root_nodes():
                 "text": f"{root['text']} {size_str}".strip(), "id": root["id"],
                 "data": {"path": root["id"], "size_bytes": size_bytes}, 
                 "icon": root["icon"], "children": True})
+            
     ROOT_NODE_CACHE = nodes; ROOT_NODE_CACHE_TIME = time.time()
+
+# --- Flask Routes ---
+@app.route('/')
+def index(): 
+    return render_template('index.html')
 
 @app.route('/api/get_tree_node')
 def get_tree_node():
@@ -359,6 +464,7 @@ def start_local_backup():
                 if not subdirs:
                     log_event(f"No subdirectories found in '{os.path.basename(parent_path)}'.", "warn")
                     socketio.emit('backup_complete', {'status': 'success'}); return
+                
                 total, completed = len(subdirs), 0
                 for i, subdir_name in enumerate(subdirs):
                     log_event(f"[{i+1}/{total}] Backing up: {subdir_name}")
@@ -380,6 +486,7 @@ def start_local_backup():
         except Exception as e:
             log_event(f"Error in backup thread: {e}", "error")
             socketio.emit('backup_complete', {'status': 'error'})
+            
     threading.Thread(target=task_wrapper, args=(config,), daemon=True).start()
     return jsonify({"status": "Local backup started."})
 
@@ -404,21 +511,21 @@ def download_backup():
                     subdir_config['sources'] = [os.path.join(parent_path, subdir_name)]
                     archive_name = generate_backup_filename(subdir_config)
                     tar_stream, processes, error_event, _ = build_backup_pipeline(subdir_config)
-                    with tar_stream:
-                        archive_content = tar_stream.read()
+                    with tar_stream: archive_content = tar_stream.read()
                     for _, proc in processes:
                         if proc.poll() is None: proc.terminate()
                         proc.wait()
                     zip_file.writestr(archive_name, archive_content)
             log_event("Zip archive created. Starting stream to browser.", 'success')
             zip_buffer.seek(0); yield zip_buffer.getvalue()
+            
         headers = {"Content-Disposition": f'attachment; filename="{quote(zip_filename)}"'}
         return Response(stream_with_context(generate_zip_stream()), headers=headers, content_type='application/zip')
     else:
         log_event("Request: Stream download.", 'info')
-        try:
-            final_stream, processes, error_event, _ = build_backup_pipeline(config)
-        except (ValueError, PermissionError) as e: return f"Error: {e}", 400
+        try: final_stream, processes, error_event, _ = build_backup_pipeline(config)
+        except Exception as e: return f"Error: {e}", 400
+        
         def generate_stream():
             try:
                 with final_stream as pipe:
@@ -427,10 +534,11 @@ def download_backup():
                         if not chunk: break
                         yield chunk
             finally:
-                log_event("Client disconnected. Cleaning up pipeline...", "info")
+                log_event("Client stream finished. Cleaning up pipeline...", "info")
                 for _, proc in processes:
                     if proc.poll() is None: proc.terminate()
                     proc.wait()
+                    
         filename = generate_backup_filename(config)
         headers = {"Content-Disposition": f'attachment; filename="{quote(filename)}"'}
         return Response(stream_with_context(generate_stream()), headers=headers, content_type='application/octet-stream')
@@ -482,6 +590,7 @@ def start_extraction():
     threading.Thread(target=run_extraction_task, args=(config, False), daemon=True).start()
     return jsonify({"status": "Extraction started."})
 
+# --- Application Startup Checks ---
 def run_with_spinner(task, message="Processing..."):
     result = [None]; thread = threading.Thread(target=lambda: result.__setitem__(0, task()))
     thread.start(); i = 0
@@ -489,41 +598,60 @@ def run_with_spinner(task, message="Processing..."):
         sys.stdout.write(f"\r{TermColors.BOLD}{message}{TermColors.ENDC} {'|/-\\'[i % 4]}"); sys.stdout.flush()
         time.sleep(0.1); i += 1
     thread.join(); sys.stdout.write('\r' + ' ' * (len(message) + 5) + '\r'); sys.stdout.flush()
+    
     final_result = result[0]
     if isinstance(final_result, Exception): raise final_result
     elif final_result is True: print(f"{TermColors.BOLD}{message}{TermColors.ENDC} {TermColors.OKGREEN}[OK]{TermColors.ENDC}")
-    else: print(f"{TermColors.BOLD}{message}{TermColors.ENDC} {TermColors.FAIL}[FAILED]{TermColors.ENDC}\n  {TermColors.WARNING}Reason: {final_result}{TermColors.ENDC}"); sys.exit(1)
+    else: 
+        print(f"{TermColors.BOLD}{message}{TermColors.ENDC} {TermColors.FAIL}[FAILED]{TermColors.ENDC}\n  {TermColors.WARNING}Reason: {final_result}{TermColors.ENDC}")
+        if "Critical missing" in str(final_result): sys.exit(1)
+
+def get_install_hint():
+    if IS_TERMUX: return "pkg install tar zstd pv gnupg age"
+    if IS_MACOS: return "brew install zstd pv gnupg age"
+    return "sudo apt install tar zstd pv gnupg age"
 
 def task_check_dependencies():
-    deps = {'tar': TAR_BIN, 'zstd': ZSTD_BIN, 'pv': PV_BIN, 'gnupg': GPG_BIN, 'age': AGE_BIN, 'termux-api': WAKELOCK_BIN}
-    missing = [name for name, path in deps.items() if not shutil.which(path)]
-    if missing: return f"Missing dependencies: {', '.join(missing)}."
+    missing_critical = [name for name in ['tar'] if not BINS[name]]
+    missing_optional = []
+    if not BINS['zstd']: missing_optional.append('zstd (falling back to gzip)')
+    if not BINS['pv']: missing_optional.append('pv (progress UI limited)')
+    
+    if missing_critical: 
+        return f"Critical missing dependencies: {', '.join(missing_critical)}.\nHint: Run `{get_install_hint()}`"
+    if missing_optional: 
+        print(f"\n{TermColors.WARNING}  [WARN] Missing optionals: {', '.join(missing_optional)}{TermColors.ENDC}")
     return True
 
 def task_check_storage_access():
-    try:
-        if os.path.exists(SHARED_STORAGE_PATH): os.listdir(SHARED_STORAGE_PATH); return True
-        else: return "Shared storage path not found. Run 'termux-setup-storage'."
-    except PermissionError: return "Shared storage not accessible. Run 'termux-setup-storage'."
-    except Exception as e: return f"Unexpected storage error: {e}"
-
-def task_acquire_wakelock():
-    try:
-        subprocess.run([WAKELOCK_BIN], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        atexit.register(release_wakelock); return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "Could not acquire wakelock via termux-api."
+    if IS_TERMUX and SHARED_STORAGE_PATH:
+        try:
+            if os.path.exists(SHARED_STORAGE_PATH): 
+                os.listdir(SHARED_STORAGE_PATH); return True
+            else: return "Shared storage path not found. Run 'termux-setup-storage'."
+        except PermissionError: return "Shared storage not accessible. Run 'termux-setup-storage'."
+    return True
 
 def release_wakelock():
-    try: subprocess.run([WAKEUNLOCK_BIN], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception: pass
+    if BINS['wakeunlock']:
+        try: subprocess.run([BINS['wakeunlock']], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception: pass
+
+def task_acquire_wakelock():
+    if not IS_TERMUX: return True
+    if BINS['wakelock']:
+        try:
+            subprocess.run([BINS['wakelock']], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            atexit.register(release_wakelock); return True
+        except Exception: return "Could not acquire Termux Wakelock."
+    return "termux-wake-lock not found. Background tasks might sleep."
 
 def get_lan_ip():
     try:
         if shutil.which("ip"):
-            cmd = ["ip", "addr", "show", "wlan0"]
+            cmd = ["ip", "addr", "show"]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=2)
-            if match := re.search(r'inet (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', result.stdout):
+            if match := re.search(r'inet (192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})', result.stdout):
                 return match.group(1)
     except Exception: pass
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(0.1)
@@ -543,10 +671,10 @@ def generate_and_display_qr(url):
 if __name__ == '__main__':
     log = logging.getLogger('werkzeug'); log.setLevel(logging.ERROR)
     
-    print(f"{TermColors.HEADER}{TermColors.BOLD}--- Termux Web Backup Suite ---{TermColors.ENDC}")
+    print(f"{TermColors.HEADER}{TermColors.BOLD}--- Web Backup Suite (Cross-Platform) ---{TermColors.ENDC}")
     run_with_spinner(task_check_dependencies, "Checking dependencies...")
     run_with_spinner(task_check_storage_access, "Verifying storage access...")
-    run_with_spinner(task_acquire_wakelock, "Acquiring wakelock...")
+    run_with_spinner(task_acquire_wakelock, "Applying background state...")
     
     task_pre_cache_root_nodes()
 
