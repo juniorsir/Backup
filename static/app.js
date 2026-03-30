@@ -183,15 +183,88 @@ $(function () {
     function startUploadExtraction() {
         if (isJobRunning) return;
         const fileInput = elements.uploadFileInput[0];
-        if (!fileInput.files || fileInput.files.length === 0) { alert("Please choose a file to upload."); return; }
-        setUiState('running', 'Uploading');
+        if (!fileInput.files || fileInput.files.length === 0) { 
+            alert("Please choose a file to upload."); 
+            return; 
+        }
+
+        const file = fileInput.files[0];
+        const fileSizeGB = file.size / (1024 * 1024 * 1024);
+
+        // Soft warning for massive files, but allows them to proceed
+        if (fileSizeGB > 2) {
+            if (!confirm(`You are uploading a ${fileSizeGB.toFixed(1)} GB file.\n\nBrowser uploads for massive files can be slow and use a lot of temporary disk space. If this fails, move the file directly to '~/backups' on your server.\n\nContinue anyway?`)) {
+                return;
+            }
+        }
+
+        setUiState('running', 'Uploading...');
+        logToScreen(`Starting upload of ${file.name} (${fileSizeGB.toFixed(2)} GB)...`, 'info');
+
         const formData = new FormData();
-        formData.append('backupFile', fileInput.files[0]);
+        formData.append('backupFile', file);
         formData.append('showFileProgress', elements.showFileProgress.is(':checked'));
-        
-        fetch('/upload_and_extract', { method: 'POST', body: formData })
-            .then(response => { if (!response.ok) return response.json().then(err => { throw new Error(err.error || 'Upload failed') }); return response.json(); })
-            .catch(error => { logToScreen(`Upload failed: ${error.message}`, 'error'); setUiState('idle', 'Error'); });
+
+        // Use XMLHttpRequest instead of fetch to track upload progress
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/upload_and_extract', true);
+
+        const startTime = Date.now();
+
+        // Track Network Upload Progress
+        xhr.upload.onprogress = function(e) {
+            if (e.lengthComputable) {
+                const percentComplete = (e.loaded / e.total) * 100;
+                
+                // Calculate Speed
+                const timeElapsed = (Date.now() - startTime) / 1000; // in seconds
+                const speedBps = e.loaded / timeElapsed;
+                const speedMBps = (speedBps / (1024 * 1024)).toFixed(1);
+
+                // Calculate ETA
+                const bytesRemaining = e.total - e.loaded;
+                const etaSeconds = isFinite(bytesRemaining / speedBps) ? Math.round(bytesRemaining / speedBps) : 0;
+                const mins = Math.floor(etaSeconds / 60).toString().padStart(2, '0');
+                const secs = (etaSeconds % 60).toString().padStart(2, '0');
+
+                // Update UI directly
+                elements.progressBar.css('width', percentComplete.toFixed(1) + '%');
+                elements.progressText.text(percentComplete.toFixed(1) + '%');
+                elements.speedIndicator.html(`<i class="fas fa-upload"></i> ${speedMBps} MB/s`);
+                
+                if (percentComplete === 100) {
+                    elements.etaIndicator.html(`<i class="fas fa-cog fa-spin"></i> Saving to disk...`);
+                    // Prevent spamming the log
+                    if (!elements.logOutput.text().includes("Server is saving file")) {
+                        logToScreen("Network upload complete. Server is now saving the file to disk (this may take a moment for large files)...", "warn");
+                    }
+                } else {
+                    elements.etaIndicator.html(`<i class="fas fa-hourglass-half"></i> ETA: ${mins}:${secs}`);
+                }
+            }
+        };
+
+        // Handle Completion
+        xhr.onload = function() {
+            if (xhr.status === 200) {
+                logToScreen("Upload saved successfully. Extraction pipeline starting...", "success");
+                // The backend will now trigger WebSocket events which will take over the progress bar for extraction
+            } else {
+                let errStr = "Upload failed.";
+                try { errStr = JSON.parse(xhr.responseText).error || errStr; } catch(e) {}
+                logToScreen(`Error: ${errStr}`, 'error');
+                setUiState('idle', 'Error');
+            }
+        };
+
+        // Handle Network Errors
+        xhr.onerror = function() {
+            logToScreen("Network connection lost during upload.", 'error');
+            setUiState('idle', 'Error');
+        };
+
+        // Send the request
+        xhr.send(formData);
     }
 
     function handleDeleteClick() {
