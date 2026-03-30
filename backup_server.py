@@ -14,6 +14,8 @@ import atexit
 import logging
 import time
 import platform
+import argparse
+import itertools
 from datetime import datetime
 from urllib.parse import quote
 import io
@@ -29,10 +31,16 @@ try:
 except ImportError:
     QRCODE_PY_AVAILABLE = False
 
-# --- Configuration & OS Detection ---
-DEBUG_MODE = True
-HOST = '0.0.0.0'
-PORT = 8000
+# --- CLI Arguments & Configuration ---
+parser = argparse.ArgumentParser(description="Web Backup Suite Server")
+parser.add_argument('--debug', action='store_true', help="Enable debug mode and verbose logging")
+parser.add_argument('--host', type=str, default='0.0.0.0', help="Host IP to bind to")
+parser.add_argument('--port', type=int, default=8000, help="Port to bind to")
+args = parser.parse_args()
+
+DEBUG_MODE = args.debug
+HOST = args.host
+PORT = args.port
 
 # Platform Identifiers
 IS_TERMUX = 'com.termux' in os.environ.get('PREFIX', '')
@@ -82,7 +90,7 @@ print_lock = threading.Lock()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'a_very_secret_key'
-socketio = SocketIO(app, async_mode='threading')
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 
 # --- Helper & Logging Functions ---
 def log_debug(message):
@@ -184,6 +192,7 @@ def build_backup_pipeline(config):
         tar_cmd.append("--ignore-failed-read")
     tar_cmd.extend(["-C", common_base, *relative_sources])
     
+    log_debug(f"Tar command: {' '.join(tar_cmd)}")
     tar_proc = subprocess.Popen(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     processes.append(("tar", tar_proc))
     next_in = tar_proc.stdout
@@ -192,10 +201,11 @@ def build_backup_pipeline(config):
     if BINS['pv']:
         pv_cmd = [BINS['pv'], '-f', '-p', '-t', '-e', '-r', '-b', '-B', '256k']
         if total_size > 0: pv_cmd.extend(['-s', str(total_size)])
+        log_debug(f"PV command: {' '.join(pv_cmd)}")
         pv_proc = subprocess.Popen(pv_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         processes.append(("pv", pv_proc))
         threading.Thread(target=monitor_pv_progress, args=(pv_proc,), daemon=True).start()
-        next_in.close() # Tar receives SIGPIPE if pv dies
+        next_in.close()
         next_in = pv_proc.stdout
 
     # 3. Compression Injection (Adaptive)
@@ -203,9 +213,10 @@ def build_backup_pipeline(config):
         comp_cmd = [BINS['zstd'], "-T0"]
         comp_name = "zstd"
     else:
-        comp_cmd = [BINS['gzip'], "-c"] # Fallback if zstd missing
+        comp_cmd = [BINS['gzip'], "-c"]
         comp_name = "gzip"
         
+    log_debug(f"Compression command: {' '.join(comp_cmd)}")
     comp_proc = subprocess.Popen(comp_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     processes.append((comp_name, comp_proc))
     next_in.close()
@@ -220,11 +231,13 @@ def build_backup_pipeline(config):
             if not password: raise ValueError("Age encryption requires a passphrase.")
             env = os.environ.copy(); env['AGE_PASSPHRASE'] = password
             age_cmd = [BINS['age'], "-p", "-o", "-"]
+            log_debug(f"Age encryption initiated.")
             final_proc = subprocess.Popen(age_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         elif method == 'gpg' and BINS['gpg']:
             recipient = config.get('gpgRecipient')
             if not recipient: raise ValueError("GPG encryption requires a recipient.")
             gpg_cmd = [BINS['gpg'], "--batch", "--yes", "--encrypt", "--recipient", recipient, "--output", "-"]
+            log_debug(f"GPG encryption initiated for {recipient}.")
             final_proc = subprocess.Popen(gpg_cmd, stdin=next_in, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
             raise RuntimeError(f"Requested encryption method '{method}' binary not found on system.")
@@ -273,7 +286,6 @@ def build_extraction_pipeline(config, is_uploaded_file=False):
         decomp_proc = subprocess.Popen([BINS['gzip'], "-dc"], stdin=next_input, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         processes.append(("gzip", decomp_proc))
     else:
-        # Fallback raw passthrough or unsupported format error
         raise ValueError("Unsupported compression format or missing decompressor.")
     
     next_input.close()
@@ -330,7 +342,7 @@ def run_backup_task(config, destination_stream):
         tar_code = exit_codes.get('tar', 0)
         other_codes_ok = all(code == 0 for name, code in exit_codes.items() if name != 'tar')
         
-        if (tar_code in [0, 1]) and other_codes_ok: # tar exits 1 on some warnings (e.g., file changed)
+        if (tar_code in [0, 1]) and other_codes_ok: 
             pipeline_success = True
             if tar_code == 1: log_event("tar finished with warnings (usually non-critical).", "warn")
             log_event("Backup task completed successfully!", 'success')
@@ -378,16 +390,14 @@ def get_human_readable_size(path):
 
 def get_size_bytes(path):
     if not os.path.isdir(path): return 0
-    # Try fast GNU du
     if BINS['du']:
         try:
-            flag = '-sb' if not IS_MACOS else '-sk' # macOS du uses 1k blocks
+            flag = '-sb' if not IS_MACOS else '-sk'
             out = subprocess.check_output([BINS['du'], flag, path], stderr=subprocess.DEVNULL, text=True, timeout=15)
             size = int(out.split()[0])
             return size * 1024 if IS_MACOS else size
         except Exception: pass
     
-    # Fallback to Python standard library
     total = 0
     try:
         for dirpath, _, filenames in os.walk(path):
@@ -410,7 +420,7 @@ def task_pre_cache_root_nodes():
     elif IS_MACOS:
         root_paths.append({"text": "Home Directory", "id": HOME_DIR, "icon": "fa fa-home"})
         root_paths.append({"text": "Root System (/)", "id": "/", "icon": "fa fa-hdd"})
-    else: # Linux / WSL
+    else: 
         root_paths.append({"text": "Home Directory", "id": HOME_DIR, "icon": "fa fa-home"})
         root_paths.append({"text": "Root File System (/)", "id": "/", "icon": "fa fa-hdd"})
 
@@ -590,18 +600,37 @@ def start_extraction():
     threading.Thread(target=run_extraction_task, args=(config, False), daemon=True).start()
     return jsonify({"status": "Extraction started."})
 
-# --- Application Startup Checks ---
+# --- Application Startup Checks (With Spinner) ---
 def run_with_spinner(task, message="Processing..."):
-    result = [None]; thread = threading.Thread(target=lambda: result.__setitem__(0, task()))
-    thread.start(); i = 0
+    result = [None]
+    exc = [None]
+    
+    def target():
+        try: result[0] = task()
+        except Exception as e: exc[0] = e
+        
+    thread = threading.Thread(target=target)
+    thread.start()
+    
+    # Smooth braille spinner
+    spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+    
     while thread.is_alive():
-        sys.stdout.write(f"\r{TermColors.BOLD}{message}{TermColors.ENDC} {'|/-\\'[i % 4]}"); sys.stdout.flush()
-        time.sleep(0.1); i += 1
-    thread.join(); sys.stdout.write('\r' + ' ' * (len(message) + 5) + '\r'); sys.stdout.flush()
+        sys.stdout.write(f"\r{TermColors.OKCYAN}{next(spinner)}{TermColors.ENDC} {TermColors.BOLD}{message}{TermColors.ENDC} ")
+        sys.stdout.flush()
+        time.sleep(0.08)
+        
+    thread.join()
+    # Clear line cleanly
+    sys.stdout.write('\r' + ' ' * (len(message) + 10) + '\r')
+    sys.stdout.flush()
+    
+    if exc[0]: raise exc[0]
     
     final_result = result[0]
     if isinstance(final_result, Exception): raise final_result
-    elif final_result is True: print(f"{TermColors.BOLD}{message}{TermColors.ENDC} {TermColors.OKGREEN}[OK]{TermColors.ENDC}")
+    elif final_result is True: 
+        print(f"{TermColors.BOLD}{message}{TermColors.ENDC} {TermColors.OKGREEN}[OK]{TermColors.ENDC}")
     else: 
         print(f"{TermColors.BOLD}{message}{TermColors.ENDC} {TermColors.FAIL}[FAILED]{TermColors.ENDC}\n  {TermColors.WARNING}Reason: {final_result}{TermColors.ENDC}")
         if "Critical missing" in str(final_result): sys.exit(1)
@@ -669,9 +698,17 @@ def generate_and_display_qr(url):
     else: print(f"\n{TermColors.WARNING}[WARN] Cannot generate QR code. Install: pip install qrcode{TermColors.ENDC}")
 
 if __name__ == '__main__':
-    log = logging.getLogger('werkzeug'); log.setLevel(logging.ERROR)
+    # Toggle logging based on debug mode
+    if not DEBUG_MODE:
+        log = logging.getLogger('werkzeug'); log.setLevel(logging.ERROR)
+        logging.getLogger('socketio').setLevel(logging.ERROR)
+        logging.getLogger('engineio').setLevel(logging.ERROR)
+    else:
+        print(f"{TermColors.WARNING}[DEBUG] Debug mode is ON. Verbose logging enabled.{TermColors.ENDC}")
     
     print(f"{TermColors.HEADER}{TermColors.BOLD}--- Web Backup Suite (Cross-Platform) ---{TermColors.ENDC}")
+    
+    # These tasks will now use the new animated Braille spinner
     run_with_spinner(task_check_dependencies, "Checking dependencies...")
     run_with_spinner(task_check_storage_access, "Verifying storage access...")
     run_with_spinner(task_acquire_wakelock, "Applying background state...")
@@ -685,4 +722,4 @@ if __name__ == '__main__':
     generate_and_display_qr(dashboard_url)
     print(f"\n{TermColors.BOLD}-> Starting server on {TermColors.OKCYAN}{HOST}:{PORT}{TermColors.ENDC}... (Press Ctrl+C to stop)")
     
-    socketio.run(app, host=HOST, port=PORT, allow_unsafe_werkzeug=True, log_output=False)
+    socketio.run(app, host=HOST, port=PORT, allow_unsafe_werkzeug=True, debug=DEBUG_MODE)
