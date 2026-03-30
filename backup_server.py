@@ -390,6 +390,10 @@ def get_human_readable_size(path):
 
 def get_size_bytes(path):
     if not os.path.isdir(path): return 0
+    
+    # SAFETY: Do not attempt to calculate the size of the entire root system
+    if path == '/': return 0
+    
     if BINS['du']:
         try:
             flag = '-sb' if not IS_MACOS else '-sk'
@@ -406,6 +410,47 @@ def get_size_bytes(path):
                 if not os.path.islink(fp): total += os.path.getsize(fp)
     except Exception: pass
     return total
+
+def task_pre_cache_root_nodes():
+    global ROOT_NODE_CACHE, ROOT_NODE_CACHE_TIME
+    print(f"{TermColors.BOLD}Pre-caching root directories...{TermColors.ENDC}")
+    
+    root_paths = []
+    if IS_TERMUX:
+        if SHARED_STORAGE_PATH and os.path.exists(SHARED_STORAGE_PATH):
+            root_paths.append({"text": "Shared Storage", "id": SHARED_STORAGE_PATH, "icon": "fa fa-mobile-alt", "calc_size": True})
+        root_paths.append({"text": "Termux Home", "id": HOME_DIR, "icon": "fa fa-terminal", "calc_size": True})
+        root_paths.append({"text": "Termux Prefix (usr)", "id": PREFIX_DIR, "icon": "fa fa-cogs", "calc_size": True})
+    elif IS_MACOS:
+        root_paths.append({"text": "Home Directory", "id": HOME_DIR, "icon": "fa fa-home", "calc_size": True})
+        root_paths.append({"text": "Root System (/)", "id": "/", "icon": "fa fa-hdd", "calc_size": False})
+    else: 
+        root_paths.append({"text": "Home Directory", "id": HOME_DIR, "icon": "fa fa-home", "calc_size": True})
+        root_paths.append({"text": "Root File System (/)", "id": "/", "icon": "fa fa-hdd", "calc_size": False})
+
+    nodes = []
+    for root in root_paths:
+        if root["id"] and os.path.exists(root["id"]):
+            sys.stdout.write(f"  -> Loading {root['text']}...")
+            sys.stdout.flush()
+            
+            # Skip heavy size calculations for massive directories like '/'
+            if root.get("calc_size", True):
+                size_str = get_human_readable_size(root["id"])
+                size_bytes = get_size_bytes(root["id"])
+                sys.stdout.write(f" {size_str}\n")
+            else:
+                size_str = "(Size hidden)"
+                size_bytes = 0
+                sys.stdout.write(f" (Skipped size calculation for speed)\n")
+                
+            sys.stdout.flush()
+            nodes.append({
+                "text": f"{root['text']} {size_str}".strip(), "id": root["id"],
+                "data": {"path": root["id"], "size_bytes": size_bytes}, 
+                "icon": root["icon"], "children": True})
+            
+    ROOT_NODE_CACHE = nodes; ROOT_NODE_CACHE_TIME = time.time()
 
 def task_pre_cache_root_nodes():
     global ROOT_NODE_CACHE, ROOT_NODE_CACHE_TIME
