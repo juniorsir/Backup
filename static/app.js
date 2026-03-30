@@ -123,14 +123,10 @@ $(function () {
         const selectedNodes = elements.fileTree.jstree(true).get_selected(true);
 
         if (config.backupSubdirs) {
-            // --- THE DEFINITIVE FIX ---
-            // A directory is an item that is NOT a file. Files are sent from the server
-            // with `children: false`. This check correctly identifies them.
             if (selectedNodes.length !== 1 || selectedNodes[0].original.children === false) {
                 alert("When backing up subdirectories individually, you must select exactly one parent directory.");
                 return;
             }
-            // --- END FIX ---
             config.parentPath = selectedNodes[0].id;
         } else {
             if (config.sources.length === 0) {
@@ -143,7 +139,13 @@ $(function () {
         setUiState('running', config.backupSubdirs ? 'Backing up Subdirectories' : 'Backing up');
 
         if (type === 'local') {
-            fetch('/start_local_backup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+            fetch('/start_local_backup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) })
+                .then(response => response.json())
+                .catch(error => {
+                    logToScreen(`Failed to contact server: ${error}`, 'error');
+                    setUiState('idle', 'Error');
+                    hideCalculatingModal();
+                });
         } else if (type === 'download') {
             const params = new URLSearchParams();
             for (const key in config) {
@@ -155,10 +157,10 @@ $(function () {
             }
             window.location.href = `/download_backup?${params.toString()}`;
             setTimeout(() => {
-                logToScreen("Download initiated. Server is preparing the file...", "info");
+                logToScreen("Download initiated. Server is preparing the stream...", "info");
                 hideCalculatingModal();
                 setUiState('idle', 'Idle');
-            }, 5000);
+            }, 6000);
         }
     }
 
@@ -171,7 +173,11 @@ $(function () {
             showFileProgress: elements.showFileProgress.is(':checked')
         };
         setUiState('running', 'Extracting');
-        fetch('/start_extraction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+        fetch('/start_extraction', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) })
+            .catch(error => {
+                logToScreen(`Failed to contact server: ${error}`, 'error');
+                setUiState('idle', 'Error');
+            });
     }
 
     function startUploadExtraction() {
@@ -182,6 +188,7 @@ $(function () {
         const formData = new FormData();
         formData.append('backupFile', fileInput.files[0]);
         formData.append('showFileProgress', elements.showFileProgress.is(':checked'));
+        
         fetch('/upload_and_extract', { method: 'POST', body: formData })
             .then(response => { if (!response.ok) return response.json().then(err => { throw new Error(err.error || 'Upload failed') }); return response.json(); })
             .catch(error => { logToScreen(`Upload failed: ${error.message}`, 'error'); setUiState('idle', 'Error'); });
